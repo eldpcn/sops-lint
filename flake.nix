@@ -13,7 +13,7 @@
         in {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "sops-lint";
-            version = "0.1.0";
+            version = "0.1.1";
             src = self;
             cargoLock.lockFile = "${self}/Cargo.lock";
             # git is a runtime dep (--staged/--git-history shell out to it),

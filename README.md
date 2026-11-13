@@ -3,6 +3,7 @@
 **A linter that understands [SOPS](https://github.com/getsops/sops).**
 
 [![CI](https://github.com/eldpcn/sops-lint/actions/workflows/ci.yml/badge.svg)](https://github.com/eldpcn/sops-lint/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/sops-lint.svg)](https://crates.io/crates/sops-lint)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Generic secret scanners (gitleaks, trufflehog, ...) don't know what SOPS is:
@@ -34,7 +35,7 @@ a `sops:` block and looks encrypted at a glance, but a key added after the
 ## Install
 
 ```sh
-cargo install --git https://github.com/eldpcn/sops-lint
+cargo install sops-lint
 ```
 
 ```sh
@@ -46,7 +47,7 @@ nix run github:eldpcn/sops-lint -- PATHS...
 ```yaml
 repos:
   - repo: https://github.com/eldpcn/sops-lint
-    rev: <tag or commit>
+    rev: v0.1.1
     hooks:
       - id: sops-lint
 ```
