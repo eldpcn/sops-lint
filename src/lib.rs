@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 /// `find_all_sops_configs` for why that's wider than just the scanned
 /// paths themselves.
 pub fn check(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let configs = load_configs(roots, config_override);
+    let (configs, config_findings) = load_configs(roots, config_override);
+    let mut findings = config_findings;
 
     for root in roots {
         let root = root.as_ref();
@@ -46,7 +46,7 @@ pub fn check(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<
                         findings.push(Finding {
                             file: path.clone(),
                             severity: Severity::Warning,
-                            check: Check::NoCreationRule,
+                            check: Check::UnparseableDocument,
                             key_path: None,
                             message: format!(
                                 "document {doc_index} couldn't be parsed as YAML, so it wasn't checked \
@@ -132,7 +132,10 @@ struct Config {
     rules: Vec<creation_rules::CreationRule>,
 }
 
-fn load_configs(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<Config> {
+fn load_configs(
+    roots: &[impl AsRef<Path>],
+    config_override: Option<&Path>,
+) -> (Vec<Config>, Vec<Finding>) {
     let config_paths: Vec<PathBuf> = match config_override {
         Some(p) => vec![p.to_path_buf()],
         None => {
@@ -153,19 +156,56 @@ fn load_configs(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> V
         }
     };
 
-    config_paths
-        .into_iter()
-        .filter_map(|path| {
-            let rules = creation_rules::load(&path).ok()?;
-            let dir = path.parent()?;
-            // Canonicalize so this is always comparable against the scanned
-            // file's own canonicalized path in `check_coverage`, regardless
-            // of whether this came from a relative scan root, an absolute
-            // `find_config_search_root` result, or a relative `--config`.
-            let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-            Some(Config { path, dir, rules })
-        })
-        .collect()
+    let mut configs = Vec::new();
+    let mut findings = Vec::new();
+
+    for path in config_paths {
+        // Canonicalize the config file itself *before* taking its parent,
+        // not after: `Path::new(".sops.yaml").parent()` is `Some("")`, and
+        // `""` isn't treated as "current directory" by `canonicalize` or
+        // `pathdiff` -- it silently broke coverage for a bare relative
+        // `--config .sops.yaml`. Canonicalizing first means `dir` always
+        // comes from an absolute path, which never has an empty parent.
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                findings.push(Finding {
+                    file: path,
+                    severity: Severity::Error,
+                    check: Check::ConfigLoadError,
+                    key_path: None,
+                    message: format!("couldn't read this .sops.yaml: {e}"),
+                });
+                continue;
+            }
+        };
+        let rules = match creation_rules::load(&canonical) {
+            Ok(r) => r,
+            Err(e) => {
+                findings.push(Finding {
+                    file: path,
+                    severity: Severity::Error,
+                    check: Check::ConfigLoadError,
+                    key_path: None,
+                    message: format!("couldn't parse this .sops.yaml: {e}"),
+                });
+                continue;
+            }
+        };
+        // `canonical` is an absolute path to a file, so it always has a
+        // parent in practice; the `else` arm exists only to satisfy the
+        // type checker for the theoretical root-as-config-file case.
+        let Some(dir) = canonical.parent() else {
+            continue;
+        };
+        configs.push(Config {
+            path,
+            dir: dir.to_path_buf(),
+            rules,
+        });
+    }
+
+    (configs, findings)
 }
 
 fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Finding>) {

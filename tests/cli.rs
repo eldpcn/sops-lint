@@ -85,6 +85,59 @@ fn multi_document_yaml_is_checked_past_the_first_document() {
 }
 
 #[test]
+fn bare_relative_config_filename_is_matched_correctly() {
+    // Regression for a real bug: `Path::new(".sops.yaml").parent()` is
+    // `Some("")`, and canonicalizing the *parent* of a bare relative
+    // `--config` filename (rather than the config file itself first) left
+    // `config.dir` as an uncanonicalized "", which made every coverage
+    // check compare against the wrong base path. Build a self-contained
+    // tree so the regex only matches if the relative-path math is right.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".sops.yaml"),
+        "creation_rules:\n  - path_regex: ^apps/.*\\.yaml$\n    age: age1exampleexampleexampleexampleexampleexampleexampleexamplex\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("apps/dev")).unwrap();
+    std::fs::write(
+        dir.path().join("apps/dev/secret.yaml"),
+        "kind: Secret\nstringData:\n  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\nsops:\n  encrypted_regex: ^(data|stringData)$\n  version: 3.8.1\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["--config", ".sops.yaml", "apps/dev/secret.yaml"])
+        .assert()
+        .success()
+        .stdout(contains("no creation_rule").not());
+}
+
+#[test]
+fn broken_config_is_reported_instead_of_silently_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("broken.sops.yaml");
+    std::fs::write(&config_path, "creation_rules: [this is not a valid rule").unwrap();
+    std::fs::write(
+        dir.path().join("secret.yaml"),
+        "kind: Secret\nstringData:\n  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\nsops:\n  encrypted_regex: ^(data|stringData)$\n  version: 3.8.1\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            dir.path().join("secret.yaml").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(contains("couldn't parse this .sops.yaml"));
+}
+
+#[test]
 fn json_output_is_a_valid_array_of_findings() {
     let output = Command::cargo_bin("sops-lint")
         .unwrap()

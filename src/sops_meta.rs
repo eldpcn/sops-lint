@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn new_key_outside_regex_with_secret_escapes() {
+    fn unrelated_key_with_secret_shaped_name_not_flagged() {
         // `annotations.token` -- neither "annotations" nor "token" matches
         // `^(data|stringData)$`, so this really is outside SOPS's own
         // stated policy, not an escape. (Unlike the nested case below,

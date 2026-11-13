@@ -18,8 +18,8 @@ impl fmt::Display for Severity {
     }
 }
 
-/// Which of the three checks produced a finding; stable identifiers for
-/// machine consumption (`--format json`), independent of the human-readable
+/// Which check produced a finding; stable identifiers for machine
+/// consumption (`--format json`), independent of the human-readable
 /// `message` wording.
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +27,12 @@ pub enum Check {
     EscapedEncryption,
     NeverEncrypted,
     NoCreationRule,
+    /// A document inside a secret-named file couldn't be parsed as YAML at
+    /// all, so it wasn't checked for either of the above.
+    UnparseableDocument,
+    /// A `.sops.yaml` (explicit `--config`, or one found during discovery)
+    /// couldn't be read or parsed, so coverage results may be incomplete.
+    ConfigLoadError,
 }
 
 #[derive(Serialize)]
