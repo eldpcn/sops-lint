@@ -42,6 +42,10 @@ cargo install sops-lint
 nix run github:eldpcn/sops-lint -- PATHS...
 ```
 
+Or grab a prebuilt Linux (x86_64, glibc) binary from the
+[releases page](https://github.com/eldpcn/sops-lint/releases) — no
+`cargo`/`nix` needed.
+
 **As a pre-commit hook:**
 
 ```yaml
