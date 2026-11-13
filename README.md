@@ -58,10 +58,15 @@ sops-lint [PATHS...]              # default: current directory
 sops-lint --config path/to/.sops.yaml PATHS...
 sops-lint --strict PATHS...       # also fail on creation_rule coverage gaps
 sops-lint --format json PATHS...  # machine-readable findings for CI/tooling
+sops-lint --staged                # check git's index content (for a pre-commit hook)
+sops-lint --git-history           # scan all of HEAD's history for secrets that were ever committed
+sops-lint --git-history=origin/main..HEAD  # or just a range, e.g. for one PR
 ```
 
 Exit code is nonzero if any finding (error, or warning under `--strict`) was
-produced.
+produced; 2 means sops-lint itself couldn't run (no `git`, not a repo, ...).
+`--git-history` never checks `no_creation_rule` coverage — not meaningful for
+a blob that may no longer exist at its old path.
 
 ### `--format json` schema
 
@@ -76,6 +81,7 @@ produced.
       "doc_index": 0,
       "key_path": "stringData.apiKey",
       "key_path_segments": ["stringData", "apiKey"],
+      "commit": null,
       "message": "stringData.apiKey is plaintext, but SOPS's own metadata says this file encrypts it"
     }
   ]
@@ -90,7 +96,7 @@ a literal key containing a dot (`tls.crt`, `.dockerconfigjson`) that would
 otherwise be indistinguishable from two nested keys. `doc_index` is the
 0-based document number within a `---`-separated multi-document file, or
 `null` for a finding that isn't about any one document (a coverage gap, or
-a config load failure).
+a config load failure). `commit` is set only in `--git-history` mode.
 
 ## How detection works, concretely
 
@@ -122,10 +128,6 @@ repo entirely.
 
 ## Known limitations (v1)
 
-- Only the **current working tree** is scanned — no git history, unlike
-  gitleaks. A secret that was ever committed plaintext and later fixed won't
-  be re-flagged, but it's also still in history; a history scanner is a
-  separate, complementary tool.
 - `encrypted_comment_regex`/`unencrypted_comment_regex` (SOPS can also scope
   encryption by YAML *comments*, not just keys) aren't checked: `serde_yaml`
   discards comments entirely, so there's nothing in our document model to
@@ -159,16 +161,13 @@ repo entirely.
   rest of that file regardless of filename and says so — a defense against
   a real `serde_yaml` bug where certain malformed input makes its
   multi-document parser loop without ever reaching the end of the stream.)
-- `sops-lint` is built on `serde_yaml`, which is itself unmaintained
-  (archived March 2024; its parser dependency `unsafe-libyaml` carries the
-  informational advisory
+- Built on `serde_yaml`, which is unmaintained (its dependency
+  `unsafe-libyaml` carries
   [RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html),
-  not a known vulnerability). Worth knowing, not yet acted on: migrating to
-  a maintained safe-Rust YAML parser (the advisory suggests `saphyr`/
-  `serde-saphyr` or `noyalib`) is real follow-up work, not a drive-by
-  dependency bump, since this tool's multi-document handling depends on
-  specific parser behavior that would need re-verifying against anything
-  that replaces it.
+  informational, not a vulnerability). `cargo audit` runs in CI on every
+  push and weekly, so an actual future vulnerability fails the build;
+  migrating off `serde_yaml` itself is real follow-up work, not a
+  drive-by swap.
 
 ## Development
 

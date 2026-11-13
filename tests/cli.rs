@@ -1,9 +1,27 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use predicates::str::contains;
+use std::path::Path;
 
 fn fixtures_path() -> &'static str {
     "tests/fixtures"
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed");
+}
+
+fn init_test_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    dir
 }
 
 #[test]
@@ -69,14 +87,9 @@ fn single_file_invocation_still_finds_the_repo_wide_config() {
 
 #[test]
 fn multi_document_yaml_is_checked_past_the_first_document() {
-    // Its own tempdir, not a bare tempfile directly in the shared OS temp
-    // root: `find_config_search_root` falls back to the file's own parent
-    // directory when no `.git` is found, and `find_all_sops_configs` then
-    // recurses from there -- a bare tempfile would make that parent the
-    // whole shared temp root, which other tests' tempdirs also live
-    // under, and a `.sops.yaml` from a concurrently-running test could get
-    // picked up by this one's search. (This did happen once while writing
-    // this test.)
+    // Own tempdir, not a bare tempfile in the shared OS temp root -- a
+    // concurrent test's .sops.yaml could get picked up by the fallback
+    // search otherwise (happened once while writing this).
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("multidoc.yaml");
     std::fs::write(
@@ -95,12 +108,8 @@ fn multi_document_yaml_is_checked_past_the_first_document() {
 
 #[test]
 fn bare_relative_config_filename_is_matched_correctly() {
-    // Regression for a real bug: `Path::new(".sops.yaml").parent()` is
-    // `Some("")`, and canonicalizing the *parent* of a bare relative
-    // `--config` filename (rather than the config file itself first) left
-    // `config.dir` as an uncanonicalized "", which made every coverage
-    // check compare against the wrong base path. Build a self-contained
-    // tree so the regex only matches if the relative-path math is right.
+    // Regression: a bare relative `--config .sops.yaml` used to resolve
+    // to an uncanonicalized "" parent, breaking every coverage check.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".sops.yaml"),
@@ -205,4 +214,110 @@ fn invalid_encrypted_regex_is_a_warning_not_silent() {
         .arg(&file_path)
         .assert()
         .stdout(contains("invalid field").and(contains("false positives")));
+}
+
+#[test]
+fn staged_mode_checks_the_index_not_the_working_tree() {
+    let dir = init_test_repo();
+    let repo = dir.path();
+
+    std::fs::write(
+        repo.join("secret.yaml"),
+        "kind: Secret\nstringData:\n  token: plaintext-in-the-index\n",
+    )
+    .unwrap();
+    run_git(repo, &["add", "secret.yaml"]);
+
+    // Overwrite the working tree -- if --staged read this instead of the
+    // index, it would report nothing.
+    std::fs::write(repo.join("secret.yaml"), "kind: ConfigMap\n").unwrap();
+
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(repo)
+        .arg("--staged")
+        .assert()
+        .failure()
+        .stdout(contains("no `sops:` block at all"));
+}
+
+#[test]
+fn staged_mode_outside_a_git_repo_is_a_tooling_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap(); // deliberately NOT a git repo
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("--staged")
+        .assert()
+        .code(2)
+        .stderr(contains("sops-lint:"));
+}
+
+#[test]
+fn git_history_finds_a_secret_that_was_later_removed() {
+    let dir = init_test_repo();
+    let repo = dir.path();
+
+    std::fs::write(
+        repo.join("secret.yaml"),
+        "kind: Secret\nstringData:\n  token: leaked-long-ago\n",
+    )
+    .unwrap();
+    run_git(repo, &["add", "secret.yaml"]);
+    run_git(repo, &["commit", "-q", "-m", "oops, plaintext secret"]);
+
+    run_git(repo, &["rm", "-q", "secret.yaml"]);
+    run_git(repo, &["commit", "-q", "-m", "remove the leaked secret"]);
+
+    // Working tree is clean -- the point of the feature is catching this.
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(repo)
+        .assert()
+        .success()
+        .stdout(contains("no findings"));
+
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(repo)
+        .arg("--git-history")
+        .assert()
+        .failure()
+        .stdout(contains("no `sops:` block at all"));
+}
+
+#[test]
+fn git_history_respects_an_explicit_rev_range() {
+    let dir = init_test_repo();
+    let repo = dir.path();
+
+    std::fs::write(
+        repo.join("secret.yaml"),
+        "kind: Secret\nstringData:\n  token: leaked-in-first-commit\n",
+    )
+    .unwrap();
+    run_git(repo, &["add", "secret.yaml"]);
+    run_git(repo, &["commit", "-q", "-m", "first"]);
+
+    std::fs::write(repo.join("harmless.yaml"), "kind: ConfigMap\n").unwrap();
+    run_git(repo, &["add", "harmless.yaml"]);
+    run_git(repo, &["commit", "-q", "-m", "second"]);
+
+    // A range excluding the first commit shouldn't see its secret.
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(repo)
+        .args(["--git-history=HEAD~1..HEAD"])
+        .assert()
+        .success()
+        .stdout(contains("no findings"));
+
+    // The default (bare flag, no explicit range) covers all of HEAD's history.
+    Command::cargo_bin("sops-lint")
+        .unwrap()
+        .current_dir(repo)
+        .arg("--git-history")
+        .assert()
+        .failure()
+        .stdout(contains("secret.yaml"));
 }

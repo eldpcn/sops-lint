@@ -16,16 +16,15 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = "${self}/Cargo.lock";
-            # A flake's `self` as `src` is the tracked-files tree with
-            # `.git` itself stripped (a quirk of the purified build sandbox)
-            # -- and exactly one test needs a real `.git` directory present
-            # to exercise config discovery from a single-file scan root.
-            # Every other test either scans a directory that already
-            # contains its own `.sops.yaml` fixture, or scans a file with no
-            # nearby config at all either way, so skipping just this one
-            # lets the rest of the suite actually run as part of `nix
-            # build`. The GitHub Actions `test` job still runs the full
-            # suite, `.git` included, against a normal checkout.
+            # git is a runtime dep (--staged/--git-history shell out to it),
+            # not just a build input -- wrapProgram makes it find it.
+            nativeBuildInputs = [ pkgs.git pkgs.makeWrapper ];
+            postFixup = ''
+              wrapProgram $out/bin/sops-lint --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git ]}
+            '';
+            # Skips the one test needing this *repo's own* .git, which the
+            # flake's src (tracked files only) doesn't have. GitHub Actions
+            # runs the full suite against a real checkout.
             checkFlags = [
               "--skip=single_file_invocation_still_finds_the_repo_wide_config"
             ];

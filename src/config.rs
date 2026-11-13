@@ -54,8 +54,10 @@ pub fn load_configs(
         let canonical = match std::fs::canonicalize(&path) {
             Ok(c) => c,
             Err(e) => {
-                findings.push(config_load_error(
+                findings.push(Finding::new(
                     path,
+                    Severity::Error,
+                    Check::ConfigLoadError,
                     format!("couldn't read this .sops.yaml: {e}"),
                 ));
                 continue;
@@ -64,8 +66,10 @@ pub fn load_configs(
         let rules = match creation_rules::load(&canonical) {
             Ok(r) => r,
             Err(e) => {
-                findings.push(config_load_error(
+                findings.push(Finding::new(
                     path,
+                    Severity::Error,
+                    Check::ConfigLoadError,
                     format!("couldn't parse this .sops.yaml: {e}"),
                 ));
                 continue;
@@ -87,34 +91,17 @@ pub fn load_configs(
     (configs, findings)
 }
 
-fn config_load_error(path: PathBuf, message: String) -> Finding {
-    Finding {
-        file: path,
-        severity: Severity::Error,
-        check: Check::ConfigLoadError,
-        doc_index: None,
-        key_path: None,
-        key_path_segments: None,
-        message,
-    }
-}
-
 /// Checks whether `path` is covered by some creation rule in `configs`,
 /// pushing a warning finding onto `findings` if not (or if there were no
 /// configs to check against at all).
 pub fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Finding>) {
     if configs.is_empty() {
-        findings.push(Finding {
-            file: path.to_path_buf(),
-            severity: Severity::Warning,
-            check: Check::NoCreationRule,
-            doc_index: None,
-            key_path: None,
-            key_path_segments: None,
-            message: "no .sops.yaml found anywhere in this file's repo; nothing would encrypt \
-                      it today"
-                .to_string(),
-        });
+        findings.push(Finding::new(
+            path,
+            Severity::Warning,
+            Check::NoCreationRule,
+            "no .sops.yaml found anywhere in this file's repo; nothing would encrypt it today",
+        ));
         return;
     }
 
@@ -130,14 +117,11 @@ pub fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Findin
     });
 
     if !covered {
-        findings.push(Finding {
-            file: path.to_path_buf(),
-            severity: Severity::Warning,
-            check: Check::NoCreationRule,
-            doc_index: None,
-            key_path: None,
-            key_path_segments: None,
-            message: format!(
+        findings.push(Finding::new(
+            path,
+            Severity::Warning,
+            Check::NoCreationRule,
+            format!(
                 "no creation_rule in any of {} matches this path; re-encrypting today would \
                  leave it in plaintext",
                 configs
@@ -146,6 +130,6 @@ pub fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Findin
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-        });
+        ));
     }
 }

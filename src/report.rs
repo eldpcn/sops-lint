@@ -46,9 +46,10 @@ pub enum Check {
     InvalidSopsMetadata,
 }
 
-/// One finding. `#[non_exhaustive]`: constructing or exhaustively matching
-/// this outside the crate shouldn't be possible, so a future field or
-/// variant addition isn't a breaking change for a library consumer.
+/// One finding. `#[non_exhaustive]` so adding a field/variant later isn't
+/// a breaking change for a library consumer. Built via `Finding::new(..)`
+/// and `.with_*` rather than a literal at each call site -- fewer places
+/// to miss a field as more get added.
 #[derive(Serialize)]
 #[non_exhaustive]
 pub struct Finding {
@@ -69,7 +70,45 @@ pub struct Finding {
     /// The same key path as `key_path`, as the actual unambiguous
     /// sequence of map keys from the document root.
     pub key_path_segments: Option<Vec<String>>,
+    /// Commit hash, in `--git-history` mode. `None` otherwise.
+    pub commit: Option<String>,
     pub message: String,
+}
+
+impl Finding {
+    pub fn new(
+        file: impl Into<PathBuf>,
+        severity: Severity,
+        check: Check,
+        message: impl Into<String>,
+    ) -> Self {
+        Finding {
+            file: file.into(),
+            severity,
+            check,
+            doc_index: None,
+            key_path: None,
+            key_path_segments: None,
+            commit: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn with_doc_index(mut self, doc_index: usize) -> Self {
+        self.doc_index = Some(doc_index);
+        self
+    }
+
+    pub fn with_key_path(mut self, path: String, segments: Vec<String>) -> Self {
+        self.key_path = Some(path);
+        self.key_path_segments = Some(segments);
+        self
+    }
+
+    pub fn with_commit(mut self, commit: impl Into<String>) -> Self {
+        self.commit = Some(commit.into());
+        self
+    }
 }
 
 /// `PathBuf`'s own `Serialize` requires valid UTF-8 and errors otherwise --
