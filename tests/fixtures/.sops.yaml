@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: apps/.*/secret.*\.yaml$
+    age: age1exampleexampleexampleexampleexampleexampleexampleexamplex
