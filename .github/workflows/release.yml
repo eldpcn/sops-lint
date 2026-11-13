@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach a binary to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          asset="sops-lint-${tag}-x86_64-unknown-linux-gnu"
+          cp target/release/sops-lint "$asset"
+          gh release create "$tag" "$asset" --title "sops-lint $tag" --generate-notes \
+            || gh release upload "$tag" "$asset" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
