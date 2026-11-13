@@ -4,13 +4,14 @@ pub mod report;
 pub mod sops_meta;
 pub mod unmanaged;
 
-use report::{Finding, Severity};
+use report::{Check, Finding, Severity};
 use std::path::Path;
 
 /// Scan every YAML file under `roots` and return all findings.
 ///
-/// `config_override` forces a specific `.sops.yaml`; otherwise each file
-/// uses whichever one is nearest to it, same as SOPS itself does.
+/// `config_override` forces a specific `.sops.yaml`; otherwise every
+/// `.sops.yaml`/`.sops.yml` found under `roots` is a candidate for every
+/// file (see `discover::find_all_sops_configs` for why).
 pub fn check(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -31,6 +32,8 @@ pub fn check(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<
                     findings.push(Finding {
                         file: path.clone(),
                         severity: Severity::Error,
+                        check: Check::EscapedEncryption,
+                        key_path: Some(escape.path.clone()),
                         message: format!(
                             "{} is plaintext, but SOPS's own metadata says this file encrypts it",
                             escape.path
@@ -43,6 +46,8 @@ pub fn check(roots: &[impl AsRef<Path>], config_override: Option<&Path>) -> Vec<
                     findings.push(Finding {
                         file: path.clone(),
                         severity: Severity::Error,
+                        check: Check::NeverEncrypted,
+                        key_path: Some(leak.path.clone()),
                         message: format!(
                             "{} is a plaintext secret in a file with no `sops:` block at all",
                             leak.path
@@ -85,6 +90,8 @@ fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Finding>) 
         findings.push(Finding {
             file: path.to_path_buf(),
             severity: Severity::Warning,
+            check: Check::NoCreationRule,
+            key_path: None,
             message: "no .sops.yaml found anywhere under the scanned root; nothing would \
                       encrypt this file today"
                 .to_string(),
@@ -105,6 +112,8 @@ fn check_coverage(path: &Path, configs: &[Config], findings: &mut Vec<Finding>) 
         findings.push(Finding {
             file: path.to_path_buf(),
             severity: Severity::Warning,
+            check: Check::NoCreationRule,
+            key_path: None,
             message: format!(
                 "no creation_rule in any of {} matches this path; re-encrypting today would \
                  leave it in plaintext",

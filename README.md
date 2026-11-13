@@ -10,10 +10,10 @@ is built around SOPS's own rules instead of generic entropy scanning, so it
 catches three specific, real failure modes:
 
 1. **Escaped encryption.** A file has a `sops:` metadata block (so someone
-   ran `sops -e` on it), but some value SOPS's own `encrypted_regex` /
-   `encrypted_key_groups` says it should cover is still plaintext — usually
-   because a field was added after the regex was written, or the regex was
-   too narrow to begin with.
+   ran `sops -e` on it), but some value SOPS's own `encrypted_regex` (or
+   `unencrypted_regex`/`encrypted_suffix`/`unencrypted_suffix`) says it
+   should cover is still plaintext — usually because a field was added
+   after the regex was written, or the regex was too narrow to begin with.
 2. **Never encrypted at all.** A file looks like a Kubernetes `Secret`
    (`kind: Secret`, or a filename containing "secret") but has no `sops:`
    block whatsoever — it was committed straight, in plaintext.
@@ -31,10 +31,27 @@ Checks 1 and 2 are **errors**. Check 3 is a **warning** by default — pass
 sops-lint [PATHS...]              # default: current directory
 sops-lint --config path/to/.sops.yaml PATHS...
 sops-lint --strict PATHS...       # also fail on creation_rule coverage gaps
+sops-lint --format json PATHS...  # machine-readable findings for CI/tooling
 ```
 
 Exit code is nonzero if any finding (error, or warning under `--strict`) was
-produced — wire it into a pre-commit hook or CI step directly.
+produced.
+
+### As a pre-commit hook
+
+```yaml
+repos:
+  - repo: https://github.com/eldpcn/sops-lint
+    rev: <tag or commit>
+    hooks:
+      - id: sops-lint
+```
+
+### Via Nix
+
+```sh
+nix run github:eldpcn/sops-lint -- PATHS...
+```
 
 ## How detection works, concretely
 
@@ -67,8 +84,13 @@ directory. Pass `--config` to pin a single one instead.
   gitleaks. A secret that was ever committed plaintext and later fixed won't
   be re-flagged, but it's also still in history; a history scanner is a
   separate, complementary tool.
-- `encrypted_key_groups` (SOPS's multi-key-group mode) isn't parsed; files
-  using it are treated as fully covered rather than risking false positives.
+- `encrypted_comment_regex`/`unencrypted_comment_regex` (SOPS can also scope
+  encryption by YAML *comments*, not just keys) aren't checked: `serde_yaml`
+  discards comments entirely, so there's nothing in our document model to
+  test against them. A file relying on comment-based scoping is invisible
+  to the escape check either way. (`key_groups` itself — SOPS's Shamir
+  multi-recipient mode — doesn't affect encryption *scope* at all, only who
+  can decrypt, so it needs nothing special here.)
 - No recipient/key-rotation drift check yet (comparing a file's actual `age`/
   `pgp` recipients against what `.sops.yaml` currently specifies for its
   path) — planned, not implemented.

@@ -1,0 +1,6 @@
+- id: sops-lint
+  name: sops-lint
+  description: Catch secrets that escaped SOPS encryption, or that no creation_rule would cover.
+  entry: sops-lint
+  language: rust
+  files: \.(yaml|yml)$

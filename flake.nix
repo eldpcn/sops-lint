@@ -1,5 +1,5 @@
 {
-  description = "sops-lint dev shell";
+  description = "sops-lint: a linter that understands SOPS";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -8,6 +8,23 @@
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
     in
     {
+      packages = forAllSystems (system:
+        let pkgs = nixpkgs.legacyPackages.${system};
+        in {
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "sops-lint";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = "${self}/Cargo.lock";
+            meta = {
+              description = "A linter that understands SOPS: catches secrets that escaped encryption and files SOPS wouldn't actually cover.";
+              homepage = "https://github.com/eldpcn/sops-lint";
+              license = [ pkgs.lib.licenses.mit pkgs.lib.licenses.asl20 ];
+              mainProgram = "sops-lint";
+            };
+          };
+        });
+
       devShells = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {

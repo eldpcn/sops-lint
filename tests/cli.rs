@@ -52,3 +52,20 @@ fn strict_mode_turns_warnings_into_failures() {
         .assert()
         .failure();
 }
+
+#[test]
+fn json_output_is_a_valid_array_of_findings() {
+    let output = Command::cargo_bin("sops-lint")
+        .unwrap()
+        .args([fixtures_path(), "--format", "json"])
+        .output()
+        .unwrap();
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!findings.is_empty());
+    let escape = findings
+        .iter()
+        .find(|f| f["check"] == "escaped_encryption")
+        .expect("an escaped_encryption finding");
+    assert_eq!(escape["severity"], "error");
+    assert_eq!(escape["key_path"], "stringData.token");
+}

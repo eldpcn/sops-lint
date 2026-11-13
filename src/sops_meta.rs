@@ -116,9 +116,7 @@ mod tests {
 
     #[test]
     fn default_policy_encrypts_everything() {
-        let doc = parse(
-            "stringData:\n  token: plaintext-leak\nsops:\n  version: 3.8.1\n",
-        );
+        let doc = parse("stringData:\n  token: plaintext-leak\nsops:\n  version: 3.8.1\n");
         let meta = SopsMeta::from_doc(&doc).unwrap();
         let escapes = find_escapes(&doc, &meta);
         assert_eq!(escapes.len(), 1);
