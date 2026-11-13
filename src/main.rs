@@ -45,14 +45,18 @@ fn main() -> ExitCode {
             }
         }
         Format::Json => {
-            // `expect`: Finding only contains strings/paths/enums, all of
-            // which always serialize.
+            let report = sops_lint::report::Report::new(&findings);
+            // `expect`: every field on `Report`/`Finding` either always
+            // serializes (enums, Option<String/usize/Vec<String>>) or is
+            // explicitly made to (the `file: PathBuf` field is serialized
+            // via a lossy-UTF-8 helper, not PathBuf's own impl, precisely
+            // so this can't fail on a non-UTF-8 path).
             println!(
                 "{}",
-                serde_json::to_string_pretty(&findings).expect("findings are always serializable")
+                serde_json::to_string_pretty(&report).expect("a Report always serializes")
             );
         }
     }
 
-    ExitCode::from(sops_lint::report::exit_code(&findings, args.strict) as u8)
+    ExitCode::from(sops_lint::report::exit_code(&findings, args.strict))
 }

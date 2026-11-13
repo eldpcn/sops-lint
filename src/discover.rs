@@ -77,3 +77,34 @@ pub fn find_config_search_root(start: &Path) -> PathBuf {
     }
     start_dir
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_nearest_git_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
+        let file = dir.path().join("sub/deep/secret.yaml");
+        std::fs::write(&file, "").unwrap();
+
+        let expected = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(find_config_search_root(&file), expected);
+    }
+
+    #[test]
+    fn falls_back_to_the_starting_directory_when_no_git_found() {
+        // A tempdir under the OS temp root has no `.git` ancestor (unless
+        // the OS temp root itself is inside a git checkout, which it never
+        // legitimately is) -- this exercises the "walked all the way up
+        // and found nothing" path rather than the happy path above.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secret.yaml");
+        std::fs::write(&file, "").unwrap();
+
+        let expected = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(find_config_search_root(&file), expected);
+    }
+}

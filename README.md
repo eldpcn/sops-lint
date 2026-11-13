@@ -22,11 +22,14 @@ a `sops:` block and looks encrypted at a glance, but a key added after the
 
 ## What it catches
 
-| # | Check | Severity |
-|---|-------|----------|
-| 1 | **Escaped encryption** — a file has a `sops:` block, but a value under a key SOPS's own `encrypted_regex`/`unencrypted_regex`/`encrypted_suffix`/`unencrypted_suffix` says it covers is still plaintext. Checked at every nesting depth, matching SOPS's own `shouldBeEncrypted`: a key several levels down is covered even if none of its ancestors are. | error |
-| 2 | **Never encrypted at all** — a file looks like a Kubernetes `Secret` (`kind: Secret`, or a filename containing "secret") but has no `sops:` block whatsoever. | error |
-| 3 | **No creation rule would catch it** — independent of current encryption state, the file's path doesn't match any `creation_rules[].path_regex` in `.sops.yaml`, so re-running `sops -e` today would leave it (or re-leave it) in plaintext. | warning (`--strict` to fail on it too) |
+| `check` id | What it means | Severity |
+|---|---|---|
+| `escaped_encryption` | A file has a `sops:` block, but a value under a key SOPS's own `encrypted_regex`/`unencrypted_regex`/`encrypted_suffix`/`unencrypted_suffix` says it covers is still plaintext. Checked at every nesting depth, matching SOPS's own `shouldBeEncrypted`: a key several levels down is covered even if none of its ancestors are. | error |
+| `never_encrypted` | A file looks like a Kubernetes `Secret` (`kind: Secret`, or a filename containing "secret") but has no `sops:` block whatsoever. | error |
+| `no_creation_rule` | Independent of current encryption state, the file's path doesn't match any `creation_rules[].path_regex` in `.sops.yaml`, so re-running `sops -e` today would leave it (or re-leave it) in plaintext. | warning (`--strict` to fail on it too) |
+| `invalid_sops_metadata` | A file's own `encrypted_regex`/`unencrypted_regex` doesn't compile as a regex, so coverage for that document fell back to "encrypt everything" — which can itself cause false positives. | warning |
+| `config_load_error` | A `.sops.yaml` (explicit `--config`, or one found during discovery) couldn't be read or parsed. Coverage results may be incomplete as a result. | error |
+| `unparseable_document` | A document (or, if unreadable, a whole file) in a secret-named path couldn't be parsed as YAML at all, so it wasn't checked. | warning |
 
 ## Install
 
@@ -60,13 +63,42 @@ sops-lint --format json PATHS...  # machine-readable findings for CI/tooling
 Exit code is nonzero if any finding (error, or warning under `--strict`) was
 produced.
 
+### `--format json` schema
+
+```json
+{
+  "version": 1,
+  "findings": [
+    {
+      "file": "apps/payments/secret.yaml",
+      "severity": "error",
+      "check": "escaped_encryption",
+      "doc_index": 0,
+      "key_path": "stringData.apiKey",
+      "key_path_segments": ["stringData", "apiKey"],
+      "message": "stringData.apiKey is plaintext, but SOPS's own metadata says this file encrypts it"
+    }
+  ]
+}
+```
+
+Always an object, never a bare top-level array — a bare array can't gain a
+field later (a summary count, say) without breaking every existing parser.
+`key_path` is dotted for display only; prefer `key_path_segments` for
+anything that parses it back apart, since a real Kubernetes secret can have
+a literal key containing a dot (`tls.crt`, `.dockerconfigjson`) that would
+otherwise be indistinguishable from two nested keys. `doc_index` is the
+0-based document number within a `---`-separated multi-document file, or
+`null` for a finding that isn't about any one document (a coverage gap, or
+a config load failure).
+
 ## How detection works, concretely
 
 SOPS encrypts *values*, not the document structure: a ciphertext leaf is
 always a string of the form `ENC[AES256_GCM,data:...,iv:...,tag:...,type:...]`,
 and the file's own `sops:` block records which keys it intended to cover.
-That means check 1 needs no decryption and no access to your keys: it's
-pure static analysis of a file against its own stated policy.
+That means `escaped_encryption` needs no decryption and no access to your
+keys: it's pure static analysis of a file against its own stated policy.
 
 ## `.sops.yaml` discovery
 
@@ -115,14 +147,28 @@ repo entirely.
 - YAML only — SOPS also supports JSON, `.env`, and INI files, none of which
   `sops-lint` reads (the `.yaml`/`.yml` extension filter in `discover.rs`
   skips everything else). `---`-separated multi-document YAML files *are*
-  handled: each document is checked independently, and a finding's
-  `key_path` is prefixed `doc[N].` for anything past the first.
+  handled: each document is checked independently (see `doc_index` in the
+  JSON schema above).
 - If a document fails to parse as YAML at all, it's silently skipped unless
   the filename contains "secret" (case-insensitive), in which case that's a
   warning instead. Not every `.yaml` file that fails to parse is suspicious
   — Helm chart templates routinely use `{{ .Values.x }}` syntax that isn't
   valid YAML on its own — so the narrower filename heuristic is there to
   avoid drowning real findings in noise from an ordinary templated repo.
+  (If three documents in a row fail to parse, `sops-lint` gives up on the
+  rest of that file regardless of filename and says so — a defense against
+  a real `serde_yaml` bug where certain malformed input makes its
+  multi-document parser loop without ever reaching the end of the stream.)
+- `sops-lint` is built on `serde_yaml`, which is itself unmaintained
+  (archived March 2024; its parser dependency `unsafe-libyaml` carries the
+  informational advisory
+  [RUSTSEC-2024-0449](https://rustsec.org/advisories/RUSTSEC-2024-0449.html),
+  not a known vulnerability). Worth knowing, not yet acted on: migrating to
+  a maintained safe-Rust YAML parser (the advisory suggests `saphyr`/
+  `serde-saphyr` or `noyalib`) is real follow-up work, not a drive-by
+  dependency bump, since this tool's multi-document handling depends on
+  specific parser behavior that would need re-verifying against anything
+  that replaces it.
 
 ## Development
 

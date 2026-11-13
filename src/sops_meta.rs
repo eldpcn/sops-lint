@@ -10,6 +10,13 @@ pub struct SopsMeta {
     unencrypted_regex: Option<Regex>,
     encrypted_suffix: Option<String>,
     unencrypted_suffix: Option<String>,
+    /// `encrypted_regex`/`unencrypted_regex` field names whose value
+    /// didn't compile as a regex. When non-empty, `covers_path` fell back
+    /// to "encrypt everything" for every leaf in this document, which can
+    /// false-positive on fields that were always meant to stay plaintext;
+    /// callers should surface this rather than trusting escape results
+    /// silently.
+    invalid_fields: Vec<String>,
 }
 
 impl SopsMeta {
@@ -17,14 +24,32 @@ impl SopsMeta {
     pub fn from_doc(doc: &Value) -> Option<Self> {
         let sops = doc.as_mapping()?.get("sops")?.as_mapping()?;
         let str_field = |k: &str| sops.get(k).and_then(Value::as_str).map(str::to_owned);
-        let regex_field = |k: &str| str_field(k).and_then(|s| Regex::new(&s).ok());
+
+        let mut invalid_fields = Vec::new();
+        let mut regex_field = |k: &str| {
+            let s = str_field(k)?;
+            match Regex::new(&s) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    invalid_fields.push(format!("{k}: {e}"));
+                    None
+                }
+            }
+        };
+        let encrypted_regex = regex_field("encrypted_regex");
+        let unencrypted_regex = regex_field("unencrypted_regex");
 
         Some(SopsMeta {
-            encrypted_regex: regex_field("encrypted_regex"),
-            unencrypted_regex: regex_field("unencrypted_regex"),
+            encrypted_regex,
+            unencrypted_regex,
             encrypted_suffix: str_field("encrypted_suffix"),
             unencrypted_suffix: str_field("unencrypted_suffix"),
+            invalid_fields,
         })
+    }
+
+    pub fn invalid_fields(&self) -> &[String] {
+        &self.invalid_fields
     }
 
     /// Whether SOPS encrypts a leaf reached by this chain of map keys, root
@@ -57,10 +82,14 @@ impl SopsMeta {
     }
 }
 
-/// A leaf value SOPS should have encrypted but didn't, identified by its
-/// dotted path from the document root (e.g. `stringData.token`).
+/// A leaf value SOPS should have encrypted but didn't.
 pub struct Escape {
+    /// Dotted path from the document root, for display (e.g. `stringData.token`).
     pub path: String,
+    /// The same path as the actual sequence of map keys -- unambiguous,
+    /// unlike `path`, for a key that itself contains a literal dot
+    /// (`tls.crt` is one key in a real Kubernetes TLS secret, not two).
+    pub key_path: Vec<String>,
 }
 
 pub fn find_escapes(doc: &Value, meta: &SopsMeta) -> Vec<Escape> {
@@ -68,25 +97,22 @@ pub fn find_escapes(doc: &Value, meta: &SopsMeta) -> Vec<Escape> {
     let Some(mapping) = doc.as_mapping() else {
         return escapes;
     };
+    let mut key_path = Vec::new();
     for (key, value) in mapping {
         let Some(key) = key.as_str() else { continue };
         if key == "sops" {
             continue;
         }
-        walk(
-            key.to_string(),
-            vec![key.to_string()],
-            value,
-            meta,
-            &mut escapes,
-        );
+        key_path.push(key.to_string());
+        walk(key.to_string(), &mut key_path, value, meta, &mut escapes);
+        key_path.pop();
     }
     escapes
 }
 
 fn walk(
     display_path: String,
-    key_path: Vec<String>,
+    key_path: &mut Vec<String>,
     value: &Value,
     meta: &SopsMeta,
     escapes: &mut Vec<Escape>,
@@ -95,9 +121,9 @@ fn walk(
         Value::Mapping(map) => {
             for (k, v) in map {
                 if let Some(k) = k.as_str() {
-                    let mut key_path = key_path.clone();
                     key_path.push(k.to_string());
                     walk(format!("{display_path}.{k}"), key_path, v, meta, escapes);
+                    key_path.pop();
                 }
             }
         }
@@ -105,33 +131,35 @@ fn walk(
             for (i, v) in seq.iter().enumerate() {
                 // The enclosing keys already in `key_path` still apply to
                 // every element; the index itself isn't a key name to match.
-                walk(
-                    format!("{display_path}[{i}]"),
-                    key_path.clone(),
-                    v,
-                    meta,
-                    escapes,
-                );
+                walk(format!("{display_path}[{i}]"), key_path, v, meta, escapes);
             }
         }
         Value::String(s) => {
-            if meta.covers_path(&key_path) && !is_sops_ciphertext(s) {
-                escapes.push(Escape { path: display_path });
+            // An empty string is never a leak -- there's nothing in it to
+            // encrypt in the first place, covered or not.
+            if !s.is_empty() && !is_sops_ciphertext(s) && meta.covers_path(key_path) {
+                escapes.push(Escape {
+                    path: display_path,
+                    key_path: key_path.clone(),
+                });
             }
         }
         Value::Null => {} // nothing to leak
         // A bare number/bool at a covered leaf also means SOPS never touched it:
         // ordinary SOPS output always rewrites leaves to `ENC[...]` strings.
         _ => {
-            if meta.covers_path(&key_path) {
-                escapes.push(Escape { path: display_path });
+            if meta.covers_path(key_path) {
+                escapes.push(Escape {
+                    path: display_path,
+                    key_path: key_path.clone(),
+                });
             }
         }
     }
 }
 
 fn is_sops_ciphertext(s: &str) -> bool {
-    s.is_empty() || (s.starts_with("ENC[") && s.ends_with(']'))
+    s.starts_with("ENC[") && s.ends_with(']')
 }
 
 #[cfg(test)]
@@ -155,6 +183,7 @@ mod tests {
         let escapes = find_escapes(&doc, &meta);
         assert_eq!(escapes.len(), 1);
         assert_eq!(escapes[0].path, "stringData.token");
+        assert_eq!(escapes[0].key_path, vec!["stringData", "token"]);
     }
 
     #[test]
@@ -204,5 +233,32 @@ mod tests {
         let escapes = find_escapes(&doc, &meta);
         assert_eq!(escapes.len(), 1);
         assert_eq!(escapes[0].path, "spec.stringData.token");
+        assert_eq!(escapes[0].key_path, vec!["spec", "stringData", "token"]);
+    }
+
+    #[test]
+    fn dotted_key_name_is_one_segment_not_two() {
+        // A real Kubernetes TLS secret has a literal key named `tls.crt` --
+        // one map key containing a dot, not two nested keys. The display
+        // `path` can't tell these apart, but `key_path` must.
+        let doc = parse(
+            "stringData:\n  tls.crt: plaintext-cert\nsops:\n  encrypted_regex: ^(data|stringData)$\n  version: 3.8.1\n",
+        );
+        let meta = SopsMeta::from_doc(&doc).unwrap();
+        let escapes = find_escapes(&doc, &meta);
+        assert_eq!(escapes.len(), 1);
+        assert_eq!(escapes[0].key_path, vec!["stringData", "tls.crt"]);
+    }
+
+    #[test]
+    fn invalid_encrypted_regex_is_reported_not_silent() {
+        // An unparseable `encrypted_regex` used to silently fall back to
+        // "encrypt everything" with no indication anything was wrong.
+        let doc = parse(
+            "stringData:\n  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\nsops:\n  encrypted_regex: \"(unterminated\"\n  version: 3.8.1\n",
+        );
+        let meta = SopsMeta::from_doc(&doc).unwrap();
+        assert_eq!(meta.invalid_fields().len(), 1);
+        assert!(meta.invalid_fields()[0].starts_with("encrypted_regex: "));
     }
 }

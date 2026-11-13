@@ -1,6 +1,18 @@
 use serde_yaml::Value;
 use std::path::Path;
 
+/// Filename-only signal that a path is probably meant to hold a secret,
+/// independent of whether we have (or could parse) its content. Shared by
+/// `looks_secret_like` below (content *is* available) and by `lib::check_file`
+/// (content failed to parse, so this is all there is to go on) -- it used
+/// to be duplicated between the two, which is exactly the kind of thing
+/// that quietly drifts apart across future edits.
+pub fn filename_suggests_secret(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().contains("secret"))
+}
+
 /// Heuristic for "this file should probably be SOPS-managed", used only on
 /// files that have no `sops:` block at all (see `sops_meta`). Deliberately
 /// conservative: false negatives (a secret we miss) are expected and
@@ -13,17 +25,16 @@ pub fn looks_secret_like(path: &Path, doc: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|k| k == "Secret");
 
-    let name_says_secret = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.to_ascii_lowercase().contains("secret"));
-
-    kind_is_secret || name_says_secret
+    kind_is_secret || filename_suggests_secret(path)
 }
 
 /// A plaintext leak found in a file that was never passed through SOPS.
 pub struct Leak {
+    /// Dotted path from the document root, for display (e.g. `stringData.token`).
     pub path: String,
+    /// The same path as the actual sequence of map keys -- see
+    /// `sops_meta::Escape::key_path` for why this matters.
+    pub key_path: Vec<String>,
 }
 
 /// Flags non-empty leaves under `data`/`stringData` -- the two fields the
@@ -50,6 +61,7 @@ pub fn find_plaintext_leaks(doc: &Value) -> Vec<Leak> {
             if non_empty {
                 leaks.push(Leak {
                     path: format!("{field}.{key}"),
+                    key_path: vec![field.to_string(), key.to_string()],
                 });
             }
         }
@@ -90,6 +102,7 @@ mod tests {
         let leaks = find_plaintext_leaks(&doc);
         assert_eq!(leaks.len(), 1);
         assert_eq!(leaks[0].path, "stringData.token");
+        assert_eq!(leaks[0].key_path, vec!["stringData", "token"]);
     }
 
     #[test]
