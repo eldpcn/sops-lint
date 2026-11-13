@@ -44,3 +44,36 @@ pub fn find_all_sops_configs(root: &Path) -> Vec<PathBuf> {
         })
         .collect()
 }
+
+/// Nearest ancestor containing `.git` (directory or file, so worktrees and
+/// submodules count too), starting from `start` itself if it's a directory
+/// or from its parent if it's a file. Falls back to that same starting
+/// directory if no `.git` is found anywhere above it.
+///
+/// `find_all_sops_configs` only searches *under* whatever root it's given --
+/// fine for `sops-lint .`, but a pre-commit hook invokes `sops-lint
+/// path/to/one/secret.yaml`, where "under that root" is just the file
+/// itself, so a perfectly covered file would otherwise come back with no
+/// configs found at all. Widening the search to the whole repo is what
+/// actually matches how a shared `.sops.yaml` gets used in practice.
+pub fn find_config_search_root(start: &Path) -> PathBuf {
+    let start_dir: PathBuf = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
+
+    // Canonicalize before walking up: `Path::new("tests").parent()` is
+    // `Some("")`, and an empty path isn't treated as "current directory"
+    // by every API that takes one -- better to never produce it at all.
+    let absolute = std::fs::canonicalize(&start_dir).unwrap_or_else(|_| start_dir.clone());
+
+    let mut dir = Some(absolute.as_path());
+    while let Some(d) = dir {
+        if d.join(".git").exists() {
+            return d.to_path_buf();
+        }
+        dir = d.parent();
+    }
+    start_dir
+}

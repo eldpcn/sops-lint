@@ -2,8 +2,8 @@ use regex::Regex;
 use serde_yaml::Value;
 
 /// The subset of a file's own `sops:` metadata block that determines which
-/// top-level keys SOPS actually encrypted. SOPS stores this in the file
-/// itself at encryption time, so a file is self-describing: we don't need
+/// values SOPS actually encrypted. SOPS stores this in the file itself at
+/// encryption time, so a file is self-describing: we don't need
 /// `.sops.yaml` to know what *this* file's author intended to be covered.
 pub struct SopsMeta {
     encrypted_regex: Option<Regex>,
@@ -27,22 +27,30 @@ impl SopsMeta {
         })
     }
 
-    /// Whether SOPS encrypts everything under this top-level key.
+    /// Whether SOPS encrypts a leaf reached by this chain of map keys, root
+    /// to parent (not including the leaf's own value).
+    ///
+    /// Matches real SOPS's `shouldBeEncrypted` (`sops.go`): it tests *every*
+    /// key along the path, not just the immediate one, and a match anywhere
+    /// in the chain covers the leaf -- so `spec.stringData.token` is covered
+    /// by `encrypted_regex: ^(data|stringData)$` even though `spec` itself
+    /// doesn't match. (Array indices aren't included: they aren't key names
+    /// a regex/suffix is meant to match against.)
     ///
     /// SOPS allows at most one of the four selectors; precedence here only
     /// matters for a malformed file that sets more than one.
-    pub fn covers(&self, key: &str) -> bool {
+    pub fn covers_path(&self, key_path: &[String]) -> bool {
         if let Some(re) = &self.encrypted_regex {
-            return re.is_match(key);
+            return key_path.iter().any(|k| re.is_match(k));
         }
         if let Some(re) = &self.unencrypted_regex {
-            return !re.is_match(key);
+            return !key_path.iter().any(|k| re.is_match(k));
         }
         if let Some(suffix) = &self.encrypted_suffix {
-            return key.ends_with(suffix.as_str());
+            return key_path.iter().any(|k| k.ends_with(suffix.as_str()));
         }
         if let Some(suffix) = &self.unencrypted_suffix {
-            return !key.ends_with(suffix.as_str());
+            return !key_path.iter().any(|k| k.ends_with(suffix.as_str()));
         }
         // No selector configured: SOPS's default is to encrypt every leaf.
         true
@@ -62,37 +70,63 @@ pub fn find_escapes(doc: &Value, meta: &SopsMeta) -> Vec<Escape> {
     };
     for (key, value) in mapping {
         let Some(key) = key.as_str() else { continue };
-        if key == "sops" || !meta.covers(key) {
+        if key == "sops" {
             continue;
         }
-        walk(key.to_string(), value, &mut escapes);
+        walk(
+            key.to_string(),
+            vec![key.to_string()],
+            value,
+            meta,
+            &mut escapes,
+        );
     }
     escapes
 }
 
-fn walk(path: String, value: &Value, escapes: &mut Vec<Escape>) {
+fn walk(
+    display_path: String,
+    key_path: Vec<String>,
+    value: &Value,
+    meta: &SopsMeta,
+    escapes: &mut Vec<Escape>,
+) {
     match value {
         Value::Mapping(map) => {
             for (k, v) in map {
                 if let Some(k) = k.as_str() {
-                    walk(format!("{path}.{k}"), v, escapes);
+                    let mut key_path = key_path.clone();
+                    key_path.push(k.to_string());
+                    walk(format!("{display_path}.{k}"), key_path, v, meta, escapes);
                 }
             }
         }
         Value::Sequence(seq) => {
             for (i, v) in seq.iter().enumerate() {
-                walk(format!("{path}[{i}]"), v, escapes);
+                // The enclosing keys already in `key_path` still apply to
+                // every element; the index itself isn't a key name to match.
+                walk(
+                    format!("{display_path}[{i}]"),
+                    key_path.clone(),
+                    v,
+                    meta,
+                    escapes,
+                );
             }
         }
         Value::String(s) => {
-            if !is_sops_ciphertext(s) {
-                escapes.push(Escape { path });
+            if meta.covers_path(&key_path) && !is_sops_ciphertext(s) {
+                escapes.push(Escape { path: display_path });
             }
         }
         Value::Null => {} // nothing to leak
         // A bare number/bool at a covered leaf also means SOPS never touched it:
         // ordinary SOPS output always rewrites leaves to `ENC[...]` strings.
-        _ => escapes.push(Escape { path }),
+        _ => {
+            if meta.covers_path(&key_path) {
+                escapes.push(Escape { path: display_path });
+            }
+        }
     }
 }
 
@@ -145,17 +179,30 @@ mod tests {
 
     #[test]
     fn new_key_outside_regex_with_secret_escapes() {
-        // Someone added `annotations.token` expecting coverage, but the
-        // file's own encrypted_regex only matches `data`/`stringData` --
-        // this is exactly the bug class this tool exists to catch. It's
-        // invisible to this per-file check (annotations isn't "covered",
-        // so by definition nothing under it is an "escape" here); it's
-        // the generic-secret-scan check (deferred, see README) that would
-        // need to catch this one. Documented via this test as a known gap.
+        // `annotations.token` -- neither "annotations" nor "token" matches
+        // `^(data|stringData)$`, so this really is outside SOPS's own
+        // stated policy, not an escape. (Unlike the nested case below,
+        // there's no path component here that matches the regex at all.)
         let doc = parse(
             "annotations:\n  token: oops-plaintext\nstringData:\n  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\nsops:\n  encrypted_regex: ^(data|stringData)$\n  version: 3.8.1\n",
         );
         let meta = SopsMeta::from_doc(&doc).unwrap();
         assert!(find_escapes(&doc, &meta).is_empty());
+    }
+
+    #[test]
+    fn match_several_levels_deep_still_covers() {
+        // Real SOPS checks every key along the path, not just the top-level
+        // one (verified against `shouldBeEncrypted` in sops.go) -- so
+        // `spec.stringData.token` is covered by `encrypted_regex:
+        // ^(data|stringData)$` even though the top-level key `spec` itself
+        // doesn't match.
+        let doc = parse(
+            "spec:\n  stringData:\n    token: this-should-have-been-encrypted\nsops:\n  encrypted_regex: ^(data|stringData)$\n  version: 3.8.1\n",
+        );
+        let meta = SopsMeta::from_doc(&doc).unwrap();
+        let escapes = find_escapes(&doc, &meta);
+        assert_eq!(escapes.len(), 1);
+        assert_eq!(escapes[0].path, "spec.stringData.token");
     }
 }

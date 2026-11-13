@@ -14,6 +14,9 @@ catches three specific, real failure modes:
    `unencrypted_regex`/`encrypted_suffix`/`unencrypted_suffix`) says it
    should cover is still plaintext — usually because a field was added
    after the regex was written, or the regex was too narrow to begin with.
+   Checked at every nesting depth, matching SOPS's own `shouldBeEncrypted`:
+   a key several levels down can be covered by the regex even if none of
+   its ancestors are.
 2. **Never encrypted at all.** A file looks like a Kubernetes `Secret`
    (`kind: Secret`, or a filename containing "secret") but has no `sops:`
    block whatsoever — it was committed straight, in plaintext.
@@ -71,12 +74,20 @@ actually run: it's common to keep each `.sops.yaml` wherever is convenient
 and always pass `--config` explicitly rather than relying on discovery (this
 repo's own `nixos/.sops.yaml` says exactly that, in a comment, because its
 config is a sibling of `clusters/dev/.sops.yaml` rather than an ancestor of
-anything it governs). So `sops-lint` instead finds *every* `.sops.yaml` /
-`.sops.yml` anywhere under the scanned root and treats a file as covered if
-*any* of them has a matching `creation_rules[].path_regex` — computed as a
-true relative path (`../` segments included, same as SOPS's own
-`filepath.Rel`), not requiring the file to literally live under the config's
-directory. Pass `--config` to pin a single one instead.
+anything it governs). So `sops-lint` instead finds every `.sops.yaml` /
+`.sops.yml` anywhere in the **git repository** containing each scanned path
+(falling back to just the scanned path if it isn't in a git repo at all),
+and treats a file as covered if *any* of them has a matching
+`creation_rules[].path_regex` — computed as a true relative path (`../`
+segments included, same as SOPS's own `filepath.Rel`), not requiring the
+file to literally live under the config's directory. Pass `--config` to pin
+a single one instead.
+
+Searching the whole repo rather than just the scanned paths matters for a
+pre-commit hook specifically: it invokes `sops-lint` with individual staged
+filenames, not a directory, so "everywhere under the scanned root" would be
+just that one file — missing a `.sops.yaml` that sits elsewhere in the same
+repo entirely.
 
 ## Known limitations (v1)
 
@@ -102,6 +113,17 @@ directory. Pass `--config` to pin a single one instead.
 - `path_regex` is matched with Rust's `regex` crate, not Go's `regexp`;
   they agree on everything typical `.sops.yaml` files use, but aren't
   byte-for-byte identical in exotic patterns.
+- YAML only — SOPS also supports JSON, `.env`, and INI files, none of which
+  `sops-lint` reads (the `.yaml`/`.yml` extension filter in `discover.rs`
+  skips everything else). `---`-separated multi-document YAML files *are*
+  handled: each document is checked independently, and a finding's
+  `key_path` is prefixed `doc[N].` for anything past the first.
+- If a document fails to parse as YAML at all, it's silently skipped unless
+  the filename contains "secret" (case-insensitive), in which case that's a
+  warning instead. Not every `.yaml` file that fails to parse is suspicious
+  — Helm chart templates routinely use `{{ .Values.x }}` syntax that isn't
+  valid YAML on its own — so the narrower filename heuristic is there to
+  avoid drowning real findings in noise from an ordinary templated repo.
 
 ## Development
 

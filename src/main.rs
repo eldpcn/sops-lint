@@ -5,13 +5,14 @@ use std::process::ExitCode;
 /// A linter that understands SOPS: catches secrets that escaped encryption
 /// and files SOPS wouldn't actually cover.
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     /// Directories or files to scan (default: current directory).
     #[arg(default_value = ".")]
     paths: Vec<PathBuf>,
 
     /// Use only this .sops.yaml, instead of every .sops.yaml/.sops.yml found
-    /// under the scanned paths.
+    /// in each scanned path's git repository.
     #[arg(long)]
     config: Option<PathBuf>,
 
